@@ -1,0 +1,6 @@
+{
+  "name": "PDF to Excel OCR Converter",
+  "description": "Chuyển đổi tệp PDF scan thành tệp bảng tính Excel có định dạng chuẩn chỉnh, bảo toàn nguyên vẹn cấu trúc bảng biểu ban đầu và sửa lỗi font chữ tiếng Việt tự động bằng công nghệ AI OCR Gemini tiên tiến.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
