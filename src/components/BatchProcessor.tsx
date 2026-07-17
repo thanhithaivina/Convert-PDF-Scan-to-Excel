@@ -97,8 +97,8 @@ export default function BatchProcessor({ files, setFiles, onPreviewTable }: Batc
       try {
         // 1. Lấy trang PDF
         const page = await pdf.getPage(pageNum);
-        // Thiết lập tỉ lệ scale = 2.0 giúp hình ảnh sắc nét gấp đôi, phục vụ OCR bảng biểu chính xác cực cao
-        const viewport = page.getViewport({ scale: 2.0 });
+        // Thiết lập tỉ lệ scale = 1.5 giúp hình ảnh sắc nét vừa đủ, phục vụ OCR bảng biểu chính xác cực cao và tối ưu dung lượng
+        const viewport = page.getViewport({ scale: 1.5 });
 
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
@@ -117,8 +117,8 @@ export default function BatchProcessor({ files, setFiles, onPreviewTable }: Batc
         // Render trang PDF vào canvas
         await page.render(renderContext).promise;
 
-        // Chuyển đổi sang ảnh JPEG với chất lượng 85% giúp dung lượng tối ưu
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        // Chuyển đổi sang ảnh JPEG với chất lượng 80% giúp dung lượng tối ưu, giảm thiểu lỗi tải trọng mạng
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.80);
         base64Image = dataUrl.split(',')[1]; // Chỉ lấy phần dữ liệu Base64 thô
       } catch (renderErr: any) {
         console.error(`Render page ${pageNum} error:`, renderErr);
@@ -126,24 +126,70 @@ export default function BatchProcessor({ files, setFiles, onPreviewTable }: Batc
         throw renderErr;
       }
 
-      // 2. Gửi ảnh lên backend để thực hiện OCR qua Gemini
+      // 2. Gửi ảnh lên backend để thực hiện OCR qua Gemini với cơ chế tự động thử lại 3 lần
       try {
-        const response = await fetch('/api/ocr-table', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image: base64Image,
-            pageNum: pageNum,
-            fileName: fileItem.name
-          }),
-        });
+        let response: Response | null = null;
+        let lastErr: any = null;
+        let responseText = "";
+        const maxAttempts = 3;
 
-        if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.error || `HTTP error! status: ${response.status}`);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          response = await fetch('/api/ocr-table', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              image: base64Image,
+              pageNum: pageNum,
+              fileName: fileItem.name
+            }),
+          });
+
+          responseText = await response.text();
+
+          // Kiểm tra xem phản hồi có phải là HTML không hợp lệ hay không (thường là lỗi máy chủ hoặc khởi động lại)
+          if (response.ok && responseText.trim().startsWith("<")) {
+            throw new Error(`Phản hồi máy chủ là tài liệu HTML (có thể máy chủ đang khởi động lại hoặc gặp sự cố tạm thời).`);
+          }
+
+          if (!response.ok) {
+            let serverErrMsg = `HTTP error! status: ${response.status}`;
+            try {
+              const errData = JSON.parse(responseText);
+              serverErrMsg = errData.error || serverErrMsg;
+            } catch {
+              if (responseText.trim().startsWith("<")) {
+                serverErrMsg = `Lỗi hệ thống (${response.status}): Phản hồi HTML từ máy chủ (đang quá tải hoặc bảo trì).`;
+              } else {
+                serverErrMsg = responseText.slice(0, 150);
+              }
+            }
+            throw new Error(serverErrMsg);
+          }
+
+          // Reset lại lastErr nếu thành công
+          lastErr = null;
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          console.warn(`[BatchProcessor] Thử lại trang ${pageNum} lần thứ ${attempt}/${maxAttempts} do lỗi:`, err.message || err);
+          if (attempt < maxAttempts) {
+            // Chờ 2 giây trước khi thử lại để máy chủ phục hồi hoặc giải phóng hàng đợi
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
         }
+      }
 
-        const data: OCRResponse = await response.json();
+      if (lastErr) {
+        throw lastErr;
+      }
+
+      let data: OCRResponse;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseErr: any) {
+        throw new Error(`Dữ liệu từ máy chủ không hợp lệ: ${parseErr.message}`);
+      }
         
         // Chuyển cấu trúc bảng biểu nhận được sang TableData dạng chuẩn
         if (data.tables && data.tables.length > 0) {

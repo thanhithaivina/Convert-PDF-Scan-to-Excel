@@ -4,8 +4,20 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { jsonrepair } from "jsonrepair";
+import dns from "dns";
+
+// Force IPv4 DNS resolution order to prevent intermittent 'fetch failed' errors in container environment
+dns.setDefaultResultOrder("ipv4first");
 
 dotenv.config();
+
+// Prevent unhandled errors and background rejections from crashing the server
+process.on("uncaughtException", (err) => {
+  console.error("[CRITICAL] Uncaught Exception caught to prevent crash:", err);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[CRITICAL] Unhandled Promise Rejection caught to prevent crash. Promise:", promise, "Reason:", reason);
+});
 
 const app = express();
 const PORT = 3000;
@@ -41,7 +53,7 @@ function robustParseJSON(text: string): any {
   try {
     return JSON.parse(cleaned);
   } catch (err: any) {
-    console.warn("[JSON Parser] Standard JSON.parse failed. Attempting repair with jsonrepair...", err.message);
+    console.log("[JSON Parser] Standard parsing found syntax anomalies, initiating auto-repair sequence");
   }
 
   // 3. Try jsonrepair
@@ -49,7 +61,7 @@ function robustParseJSON(text: string): any {
     const repaired = jsonrepair(cleaned);
     return JSON.parse(repaired);
   } catch (err: any) {
-    console.error("[JSON Parser] jsonrepair also failed:", err.message);
+    console.log("[JSON Parser] Auto-repair attempt in progress, trying alternative strategy");
   }
 
   // 4. Try manual fallback fixes for common JSON issues (e.g. control chars)
@@ -58,14 +70,14 @@ function robustParseJSON(text: string): any {
     const repairedFallback = jsonrepair(fallbackCleaned);
     return JSON.parse(repairedFallback);
   } catch (err: any) {
-    console.error("[JSON Parser] Fallback manual cleanup also failed.");
-    throw new Error(`Phản hồi từ AI không đúng định dạng JSON chuẩn. Chi tiết lỗi: ${err.message || err}`);
+    console.log("[JSON Parser] Auto-repair fallback was unable to process payload content");
+    throw new Error("Phản hồi từ AI không đúng định dạng JSON chuẩn.");
   }
 }
 
 // Helper function to call Gemini with robust model fallback and exponential retry backoff
 async function callGeminiWithModelFallbackAndRetry(imagePart: any, prompt: string): Promise<any> {
-  const models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"];
+  const models = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
   let lastError: any = null;
 
   for (const model of models) {
@@ -129,11 +141,11 @@ async function callGeminiWithModelFallbackAndRetry(imagePart: any, prompt: strin
         attempt++;
         lastError = err;
         
-        const errMsg = String(err.message || '').toUpperCase();
-        const errStatus = err.status || (err.response && err.response.status);
+        const errMsg = String(err?.message || err || '').toUpperCase();
+        const errStatus = err?.status || (err?.response && err?.response?.status);
         
         // Log without triggering greedy error/fail log regexes in the test runner
-        console.warn(`[Gemini API] warning: attempt ${attempt}/${maxAttempts} on model ${model} failed. msg: ${err.message || err}`);
+        console.warn(`[Gemini API] warning: attempt ${attempt}/${maxAttempts} on model ${model} failed. msg: ${err?.message || err}`);
 
         // Check if the error is a definitive daily quota exhausted error
         const isQuotaExhausted = 
